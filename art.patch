@@ -1,0 +1,666 @@
+diff --git a/runtime/art_method.cc b/runtime/art_method.cc
+index 7030e0657b..3def9a5916 100644
+--- a/runtime/art_method.cc
++++ b/runtime/art_method.cc
+@@ -49,6 +49,36 @@
+ #include "vdex_file.h"
+ #include "well_known_classes.h"
+ 
++//add code
++#include <sys/syscall.h>
++#include <sys/types.h>
++#include <sys/stat.h>
++#include <fcntl.h>
++#include "runtime.h"
++#include <android/log.h>
++#include <assert.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <pthread.h>
++#include <stdarg.h>
++#include <stddef.h>
++#include <stdlib.h>
++#include <fstream>
++#include <iostream>
++#include <string>
++#include <sys/mman.h>
++#include <sys/socket.h>
++#include <sys/types.h>
++#include <sys/uio.h>
++#include <sys/un.h>
++#include <time.h>
++#include <unistd.h>
++
++#define gettidv1() syscall(__NR_gettid)
++#define LOG_TAG "ActivityThread"
++#define ALOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
++//add end
++
+ namespace art {
+ 
+ using android::base::StringPrintf;
+@@ -64,6 +94,380 @@ DEFINE_RUNTIME_DEBUG_FLAG(ArtMethod, kCheckDeclaringClassState);
+ static_assert(ArtMethod::kRuntimeMethodDexMethodIndex == dex::kDexNoIndex,
+               "Wrong runtime-method dex method index");
+ 
++//add
++uint8_t* codeitem_end(const uint8_t **pData)
++{
++    uint32_t num_of_list = DecodeUnsignedLeb128(pData);
++    for (;num_of_list>0;num_of_list--) {
++        int32_t num_of_handlers=DecodeSignedLeb128(pData);
++        int num=num_of_handlers;
++        if (num_of_handlers<=0) {
++            num=-num_of_handlers;
++        }
++        for (; num > 0; num--) {
++            DecodeUnsignedLeb128(pData);
++            DecodeUnsignedLeb128(pData);
++        }
++        if (num_of_handlers<=0) {
++            DecodeUnsignedLeb128(pData);
++        }
++    }
++    return (uint8_t*)(*pData);
++}
++
++extern "C" char *base64_encode(char *str,long str_len,long* outlen){
++	long len;
++    char *res;
++    int i,j;
++    const char *base64_table="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
++    if(str_len % 3 == 0)
++        len=str_len/3*4;
++    else
++        len=(str_len/3+1)*4;
++
++    res=(char*)malloc(sizeof(char)*(len+1));
++    res[len]='\0';
++    *outlen=len;
++    for(i=0,j=0;i<len-2;j+=3,i+=4)
++    {
++        res[i]=base64_table[str[j]>>2];
++        res[i+1]=base64_table[(str[j]&0x3)<<4 | (str[j+1]>>4)];
++        res[i+2]=base64_table[(str[j+1]&0xf)<<2 | (str[j+2]>>6)];
++        res[i+3]=base64_table[str[j+2]&0x3f];
++    }
++
++    switch(str_len % 3)
++    {
++        case 1:
++            res[i-2]='=';
++            res[i-1]='=';
++            break;
++        case 2:
++            res[i-1]='=';
++            break;
++    }
++
++    return res;
++	}
++	//在函数即将调用解释器执行前进行dump。
++extern "C" void dumpdexfilebyExecute(ArtMethod* artmethod)  REQUIRES_SHARED(Locks::mutator_lock_) {
++			char *dexfilepath=(char*)malloc(sizeof(char)*1000);
++			if(dexfilepath==nullptr)
++			{
++				LOG(ERROR)<< "fartext ArtMethod::dumpdexfilebyArtMethod,methodname:"<<artmethod->PrettyMethod().c_str()<<"malloc 1000 byte failed";
++				return;
++			}
++			int result=0;
++			int fcmdline =-1;
++			char szCmdline[64]= {0};
++			char szProcName[256] = {0};
++			int procid = getpid();
++			sprintf(szCmdline,"/proc/%d/cmdline", procid);
++			fcmdline = open(szCmdline, O_RDONLY,0644);
++			if(fcmdline >0)
++			{
++				result=read(fcmdline, szProcName,256);
++				if(result<0)
++				{
++					LOG(ERROR) << "fartext ArtMethod::dumpdexfilebyArtMethod,open cmdline file error";
++					}
++				close(fcmdline);
++
++			}
++
++			if(szProcName[0])
++			{
++
++					  const DexFile* dex_file = artmethod->GetDexFile();
++					  const uint8_t* begin_=dex_file->Begin();  // Start of data.
++					  size_t size_=dex_file->Size();  // Length of data.
++
++					  memset(dexfilepath,0,1000);
++					  int size_int_=(int)size_;
++
++					  memset(dexfilepath,0,1000);
++					  sprintf(dexfilepath,"%s","/sdcard/fext");
++					  mkdir(dexfilepath,0777);
++
++					  memset(dexfilepath,0,1000);
++					  sprintf(dexfilepath,"/sdcard/fext/%s",szProcName);
++					  mkdir(dexfilepath,0777);
++
++					  memset(dexfilepath,0,1000);
++					  sprintf(dexfilepath,"/sdcard/fext/%s/%d_dexfile_execute.dex",szProcName,size_int_);
++					  int dexfilefp=open(dexfilepath,O_RDONLY,0666);
++					  if(dexfilefp>0){
++						  close(dexfilefp);
++						  dexfilefp=0;
++
++						  }else{
++									  int fp=open(dexfilepath,O_CREAT|O_APPEND|O_RDWR,0666);
++									  if(fp>0)
++									  {
++										  result=write(fp,(void*)begin_,size_);
++										  if(result<0)
++										  {
++											  LOG(ERROR) << "fartext ArtMethod::dumpdexfilebyArtMethod,open dexfilepath error";
++											  }
++										  fsync(fp);
++										  close(fp);
++										  memset(dexfilepath,0,1000);
++										  sprintf(dexfilepath,"/sdcard/fext/%s/%d_classlist_execute.txt",szProcName,size_int_);
++										  int classlistfile=open(dexfilepath,O_CREAT|O_APPEND|O_RDWR,0666);
++											if(classlistfile>0)
++											{
++												for (size_t ii= 0; ii< dex_file->NumClassDefs(); ++ii)
++												{
++													const dex::ClassDef& class_def = dex_file->GetClassDef(ii);
++													const char* descriptor = dex_file->GetClassDescriptor(class_def);
++													result=write(classlistfile,(void*)descriptor,strlen(descriptor));
++													if(result<0)
++													{
++														LOG(ERROR) << "fartext ArtMethod::dumpdexfilebyArtMethod,write classlistfile file error";
++
++														}
++													const char* temp="\n";
++													result=write(classlistfile,(void*)temp,1);
++													if(result<0)
++													{
++														LOG(ERROR) << "fartext ArtMethod::dumpdexfilebyArtMethod,write classlistfile file error";
++
++														}
++													}
++												  fsync(classlistfile);
++												  close(classlistfile);
++
++												}
++										  }
++
++
++									  }
++
++
++			}
++
++			if(dexfilepath!=nullptr)
++			{
++				free(dexfilepath);
++				dexfilepath=nullptr;
++			}
++
++}
++
++extern "C" bool ShouldUnpack() {
++    int result=0;
++    int fcmdline =-1;
++    char szCmdline[64]= {0};
++    char szProcName[256] = {0};
++    int procid = getpid();
++    sprintf(szCmdline,"/proc/%d/cmdline", procid);
++    fcmdline = open(szCmdline, O_RDONLY,0644);
++    if(fcmdline >0)
++    {
++        result=read(fcmdline, szProcName,256);
++        if(result<0)
++        {
++            LOG(ERROR) << "fartext ArtMethod::ShouldUnpack,open cmdline file file error";
++        }
++        close(fcmdline);
++    }
++    if(szProcName[0]){
++        const char* UNPACK_CONFIG = "/data/local/tmp/fext.config";
++        std::ifstream config(UNPACK_CONFIG);
++        std::string line;
++        if(config) {
++            while (std::getline(config, line)) {
++              std::string package_name = line.substr(0, line.find(':'));
++              if (strstr(package_name.c_str(),szProcName)) {
++                  return true;
++              }
++            }
++        }
++        return false;
++    }
++    return false;
++
++}
++
++//主动调用函数的dump处理
++extern "C" void dumpArtMethod(ArtMethod* artmethod)  REQUIRES_SHARED(Locks::mutator_lock_) {
++            LOG(ERROR) << "fartext ArtMethod::dumpArtMethod enter "<<artmethod->PrettyMethod().c_str();
++			char *dexfilepath=(char*)malloc(sizeof(char)*1000);
++			if(dexfilepath==nullptr)
++			{
++				LOG(ERROR) << "fartext ArtMethod::dumpArtMethodinvoked,methodname:"<<artmethod->PrettyMethod().c_str()<<"malloc 1000 byte failed";
++				return;
++			}
++			int result=0;
++			int fcmdline =-1;
++			char szCmdline[64]= {0};
++			char szProcName[256] = {0};
++			int procid = getpid();
++			sprintf(szCmdline,"/proc/%d/cmdline", procid);
++			fcmdline = open(szCmdline, O_RDONLY,0644);
++			if(fcmdline >0)
++			{
++				result=read(fcmdline, szProcName,256);
++				if(result<0)
++				{
++					LOG(ERROR) << "fartext ArtMethod::dumpdexfilebyArtMethod,open cmdline file file error";
++				}
++				close(fcmdline);
++			}
++
++			if(szProcName[0])
++			{
++					  const DexFile* dex_file = artmethod->GetDexFile();
++					  const uint8_t* begin_=dex_file->Begin();  // Start of data.
++					  size_t size_=dex_file->Size();  // Length of data.
++
++					  memset(dexfilepath,0,1000);
++					  int size_int_=(int)size_;
++
++					  memset(dexfilepath,0,1000);
++					  sprintf(dexfilepath,"%s","/sdcard/fext");
++					  mkdir(dexfilepath,0777);
++
++					  memset(dexfilepath,0,1000);
++					  sprintf(dexfilepath,"/sdcard/fext/%s",szProcName);
++					  mkdir(dexfilepath,0777);
++
++					  memset(dexfilepath,0,1000);
++					  sprintf(dexfilepath,"/sdcard/fext/%s/%d_dexfile.dex",szProcName,size_int_);
++					  int dexfilefp=open(dexfilepath,O_RDONLY,0666);
++					  if(dexfilefp>0){
++						  close(dexfilefp);
++						  dexfilefp=0;
++
++						  }else{
++									  int fp=open(dexfilepath,O_CREAT|O_APPEND|O_RDWR,0666);
++									  if(fp>0)
++									  {
++										  result=write(fp,(void*)begin_,size_);
++										  if(result<0)
++											{
++												LOG(ERROR) << "fartext ArtMethod::dumpdexfilebyArtMethod,open dexfilepath file error";
++
++											}
++										  fsync(fp);
++										  close(fp);
++										  memset(dexfilepath,0,1000);
++										  sprintf(dexfilepath,"/sdcard/fext/%s/%d_classlist.txt",szProcName,size_int_);
++										  int classlistfile=open(dexfilepath,O_CREAT|O_APPEND|O_RDWR,0666);
++											if(classlistfile>0)
++											{
++												for (size_t ii= 0; ii< dex_file->NumClassDefs(); ++ii)
++												{
++													const dex::ClassDef& class_def = dex_file->GetClassDef(ii);
++													const char* descriptor = dex_file->GetClassDescriptor(class_def);
++													result=write(classlistfile,(void*)descriptor,strlen(descriptor));
++													if(result<0)
++													{
++														LOG(ERROR) << "fartext ArtMethod::dumpdexfilebyArtMethod,write classlistfile file error";
++
++														}
++													const char* temp="\n";
++													result=write(classlistfile,(void*)temp,1);
++													if(result<0)
++													{
++														LOG(ERROR) << "fartext ArtMethod::dumpdexfilebyArtMethod,write classlistfile file error";
++
++														}
++													}
++												  fsync(classlistfile);
++												  close(classlistfile);
++
++												}
++										  }
++
++
++									  }
++
++						  const dex::CodeItem* code_item = artmethod->GetCodeItem();
++						  const DexFile* dex_=artmethod->GetDexFile();
++						  CodeItemDataAccessor accessor(*dex_, dex_->GetCodeItem(artmethod->GetCodeItemOffset()));
++						  if (LIKELY(code_item != nullptr))
++						  {
++
++								  int code_item_len = 0;
++								  uint8_t *item=(uint8_t *) code_item;
++								  if (accessor.TriesSize()>0) {
++									  const uint8_t *handler_data = accessor.GetCatchHandlerData();
++									  uint8_t * tail = codeitem_end(&handler_data);
++									  code_item_len = (int)(tail - item);
++								  }else{
++									  code_item_len = 16+accessor.InsnsSizeInCodeUnits()*2;
++								  }
++									  memset(dexfilepath,0,1000);
++									  int size_int=(int)dex_file->Size();
++									  uint32_t method_idx=artmethod->GetDexMethodIndex();
++									  sprintf(dexfilepath,"/sdcard/fext/%s/%d_ins_%d.bin",szProcName,size_int,(int)gettidv1());
++								      int fp2=open(dexfilepath,O_CREAT|O_APPEND|O_RDWR,0666);
++									  if(fp2>0){
++										  lseek(fp2,0,SEEK_END);
++										  memset(dexfilepath,0,1000);
++										  int offset=(int)(item - begin_);
++										  sprintf(dexfilepath,"{name:%s,method_idx:%d,offset:%d,code_item_len:%d,ins:",artmethod->PrettyMethod().c_str(),method_idx,offset,code_item_len);
++										  int contentlength=0;
++										  while(dexfilepath[contentlength]!=0) contentlength++;
++										  result=write(fp2,(void*)dexfilepath,contentlength);
++										  if(result<0)
++													{
++														LOG(ERROR) << "fartext ArtMethod::dumpdexfilebyArtMethod,write ins file error";
++
++														}
++										  long outlen=0;
++										  char* base64result=base64_encode((char*)item,(long)code_item_len,&outlen);
++										  result=write(fp2,base64result,outlen);
++										  if(result<0)
++													{
++														LOG(ERROR) << "fartext ArtMethod::dumpdexfilebyArtMethod,write ins file error";
++
++														}
++										  result=write(fp2,"};",2);
++										  if(result<0)
++													{
++														LOG(ERROR) << "fartext ArtMethod::dumpdexfilebyArtMethod,write ins file error";
++
++														}
++										  fsync(fp2);
++										  close(fp2);
++										  if(base64result!=nullptr){
++											  free(base64result);
++											  base64result=nullptr;
++											  }
++										   }
++
++							}
++
++
++			}
++
++			if(dexfilepath!=nullptr)
++			{
++				free(dexfilepath);
++				dexfilepath=nullptr;
++			}
++			LOG(ERROR) << "fartext ArtMethod::dumpArtMethod over "<<artmethod->PrettyMethod().c_str();
++}
++extern "C" void fartextInvoke(ArtMethod* artmethod)  REQUIRES_SHARED(Locks::mutator_lock_) {
++    if(artmethod->IsNative()||artmethod->IsAbstract()){
++        return;
++    }
++	JValue result;
++	Thread *self=Thread::Current();
++	uint32_t temp[100]={0};
++	uint32_t* args=temp;
++	uint32_t args_size = (uint32_t)ArtMethod::NumArgRegisters(artmethod->GetShorty());
++    if (!artmethod->IsStatic()) {
++      args_size += 1;
++    }
++    result.SetI(111111);
++	LOG(ERROR) << "fartext fartextInvoke";
++	artmethod->Invoke(self, args, args_size, &result,artmethod->GetShorty());
++}
++//add end
++
+ ArtMethod* ArtMethod::GetCanonicalMethod(PointerSize pointer_size) {
+   if (LIKELY(!IsDefault())) {
+     return this;
+@@ -337,6 +741,27 @@ void ArtMethod::Invoke(Thread* self, uint32_t* args, uint32_t args_size, JValue*
+   // If the runtime is not yet started or it is required by the debugger, then perform the
+   // Invocation by the interpreter, explicitly forcing interpretation over JIT to prevent
+   // cycling around the various JIT/Interpreter methods that handle method invocation.
++
++  //add
++  if ((result!=nullptr && result->GetI()==111111)&&!IsNative()){
++      const dex::CodeItem* code_item =this->GetCodeItem();
++      if(LIKELY(code_item!=nullptr)){
++
++          if (IsStatic()) {
++            LOG(ERROR) << "fartext artMethod::Invoke Static Method "<<this->PrettyMethod().c_str();
++            art::interpreter::EnterInterpreterFromInvoke(
++                            self, this, nullptr, args, result, /*stay_in_interpreter=*/ true);
++          }else{
++            LOG(ERROR) << "fartext artMethod::Invoke Method "<<this->PrettyMethod().c_str();
++            art::interpreter::EnterInterpreterFromInvoke(
++                      self, this, nullptr, args + 1, result, /*stay_in_interpreter=*/ true);
++          }
++          self->PopManagedStackFragment(fragment);
++      }
++      return;
++  }
++  //add end
++
+   if (UNLIKELY(!runtime->IsStarted() || Dbg::IsForcedInterpreterNeededForCalling(self, this))) {
+     if (IsStatic()) {
+       art::interpreter::EnterInterpreterFromInvoke(
+diff --git a/runtime/interpreter/interpreter.cc b/runtime/interpreter/interpreter.cc
+index 735c0e815a..a79cef52f3 100644
+--- a/runtime/interpreter/interpreter.cc
++++ b/runtime/interpreter/interpreter.cc
+@@ -36,8 +36,13 @@
+ #include "unstarted_runtime.h"
+ 
+ namespace art {
++//add
++extern "C" bool ShouldUnpack();
++//add end
+ namespace interpreter {
+-
++	//add
++	extern "C" void dumpdexfilebyExecute(ArtMethod* artmethod);
++	//addend
+ ALWAYS_INLINE static ObjPtr<mirror::Object> ObjArg(uint32_t arg)
+     REQUIRES_SHARED(Locks::mutator_lock_) {
+   return ObjPtr<mirror::Object>(reinterpret_cast<mirror::Object*>(arg));
+@@ -246,6 +251,18 @@ static inline JValue Execute(
+     bool stay_in_interpreter = false) REQUIRES_SHARED(Locks::mutator_lock_) {
+   DCHECK(!shadow_frame.GetMethod()->IsAbstract());
+   DCHECK(!shadow_frame.GetMethod()->IsNative());
++  //add
++  if(result_register.GetI()==111111){
++    LOG(ERROR) << "fartext Execute start "<<shadow_frame.GetMethod()->PrettyMethod().c_str();
++  }
++  if(strstr(shadow_frame.GetMethod()->PrettyMethod().c_str(),"<clinit>"))
++  {
++      if(ShouldUnpack()){
++          dumpdexfilebyExecute(shadow_frame.GetMethod());
++      }
++
++  }
++  //add end
+   if (LIKELY(shadow_frame.GetDexPC() == 0)) {  // Entering the method, but not via deoptimization.
+     if (kIsDebugBuild) {
+       self->AssertNoPendingException();
+@@ -416,8 +433,14 @@ void EnterInterpreterFromInvoke(Thread* self,
+ 
+   size_t cur_reg = num_regs - num_ins;
+   if (!method->IsStatic()) {
+-    CHECK(receiver != nullptr);
+-    shadow_frame->SetVRegReference(cur_reg, receiver.Ptr());
++    //add
++    if (result!=nullptr&&result->GetI()==111111) {
++      shadow_frame->SetVReg(cur_reg, args[0]);
++    } else {
++      CHECK(receiver != nullptr);
++      shadow_frame->SetVRegReference(cur_reg, receiver.Ptr());
++    }
++    //add end 
+     ++cur_reg;
+   }
+   uint32_t shorty_len = 0;
+@@ -426,6 +449,12 @@ void EnterInterpreterFromInvoke(Thread* self,
+     DCHECK_LT(shorty_pos + 1, shorty_len);
+     switch (shorty[shorty_pos + 1]) {
+       case 'L': {
++        //add
++        if (result!=nullptr&&result->GetI()==111111) {
++            shadow_frame->SetVReg(cur_reg, args[0]);
++            break;
++        }
++        //add end
+         ObjPtr<mirror::Object> o =
+             reinterpret_cast<StackReference<mirror::Object>*>(&args[arg_pos])->AsMirrorPtr();
+         shadow_frame->SetVRegReference(cur_reg, o.Ptr());
+diff --git a/runtime/interpreter/interpreter_switch_impl.cc b/runtime/interpreter/interpreter_switch_impl.cc
+index 283885e522..8803f5aa9b 100644
+--- a/runtime/interpreter/interpreter_switch_impl.cc
++++ b/runtime/interpreter/interpreter_switch_impl.cc
+@@ -26,6 +26,9 @@
+ #include "safe_math.h"
+ 
+ namespace art {
++//add
++extern "C" void dumpArtMethod(ArtMethod* artmethod);
++//add end
+ namespace interpreter {
+ 
+ #define HANDLE_PENDING_EXCEPTION_WITH_INSTRUMENTATION(instr)                                    \
+@@ -208,7 +211,12 @@ void ExecuteSwitchImplCpp(SwitchImplContext* ctx) {
+     return;
+   }
+   self->VerifyStack();
+-
++  //add
++  int32_t regvalue=ctx->result_register.GetI();
++  ctx->result_register=JValue();
++  int inst_count = -1;
++  bool flag=false;
++  //add end
+   uint32_t dex_pc = shadow_frame.GetDexPC();
+   const auto* const instrumentation = Runtime::Current()->GetInstrumentation();
+   const uint16_t* const insns = accessor.Insns();
+@@ -221,6 +229,33 @@ void ExecuteSwitchImplCpp(SwitchImplContext* ctx) {
+     shadow_frame.SetDexPC(dex_pc);
+     TraceExecution(shadow_frame, inst, dex_pc);
+     inst_data = inst->Fetch16(0);
++    //add
++    inst_count++;
++    uint8_t opcode = inst->Opcode(inst_data);
++
++    if(regvalue==111111){
++        if(inst_count == 0){
++            if(opcode == Instruction::GOTO || opcode == Instruction::GOTO_16 || opcode == Instruction::GOTO_32){
++                LOG(ERROR) << "fartext ExecuteSwitchImplCpp Switch inst_count=0 opcode==GOTO "<<shadow_frame.GetMethod()->PrettyMethod().c_str();
++                flag=true;
++            }else{
++                LOG(ERROR) << "fartext ExecuteSwitchImplCpp Switch inst_count=0 opcode!=GOTO "<<shadow_frame.GetMethod()->PrettyMethod().c_str();
++                dumpArtMethod(shadow_frame.GetMethod());
++                break;
++            }
++        }
++        if(inst_count == 1){
++            if(opcode >= Instruction::CONST_4 && opcode <= Instruction::CONST_WIDE_HIGH16){
++                LOG(ERROR) << "fartext ExecuteSwitchImplCpp Switch inst_count=1 opcode==CONST "<<shadow_frame.GetMethod()->PrettyMethod().c_str();
++                flag=true;
++            }else{
++                LOG(ERROR) << "fartext ExecuteSwitchImplCpp Switch inst_count=1 opcode!=CONST "<<shadow_frame.GetMethod()->PrettyMethod().c_str();
++                dumpArtMethod(shadow_frame.GetMethod());
++                break;
++            }
++        }
++    }
++    //add end
+     switch (inst->Opcode(inst_data)) {
+       case Instruction::NOP:
+         PREAMBLE();
+@@ -2495,6 +2530,22 @@ void ExecuteSwitchImplCpp(SwitchImplContext* ctx) {
+       case Instruction::UNUSED_F3 ... Instruction::UNUSED_F9:
+         UnexpectedOpcode(inst, shadow_frame);
+     }
++    //add
++    if(regvalue==111111){
++        if(inst_count==2&&flag){
++            if(opcode == Instruction::INVOKE_STATIC || opcode == Instruction::INVOKE_STATIC_RANGE){
++                LOG(ERROR) << "fartext ExecuteSwitchImplCpp Switch INVOKE_STATIC over "<<shadow_frame.GetMethod()->PrettyMethod().c_str();
++                dumpArtMethod(shadow_frame.GetMethod());
++                break;
++            }
++        }
++        if(inst_count>2){
++            LOG(ERROR) << "fartext ExecuteSwitchImplCpp Switch inst_count>2 " <<shadow_frame.GetMethod()->PrettyMethod().c_str();
++            dumpArtMethod(shadow_frame.GetMethod());
++            break;
++        }
++    }
++    //add end
+   } while (!interpret_one_instruction);
+   // Record where we stopped.
+   shadow_frame.SetDexPC(inst->GetDexPc(insns));
+diff --git a/runtime/native/dalvik_system_DexFile.cc b/runtime/native/dalvik_system_DexFile.cc
+index 637e7facaf..f2b6786cc6 100644
+--- a/runtime/native/dalvik_system_DexFile.cc
++++ b/runtime/native/dalvik_system_DexFile.cc
+@@ -52,6 +52,11 @@
+ 
+ namespace art {
+ 
++//add
++extern "C" void fartextInvoke(ArtMethod* artmethod);
++extern "C" ArtMethod* jobject2ArtMethod(JNIEnv* env, jobject javaMethod);
++//add end
++
+ using android::base::StringPrintf;
+ 
+ static bool ConvertJavaArrayToDexFiles(
+@@ -600,6 +605,17 @@ static jobjectArray DexFile_getDexFileOptimizationStatus(JNIEnv* env,
+   return result;
+ }
+ 
++//addfunction 将Java的Method转换成ArtMethod。然后主动调用
++static void DexFile_fartextMethodCode(JNIEnv* env, jclass, jobject method) {
++  if(method != nullptr)
++  {
++		  ArtMethod* proxy_method = jobject2ArtMethod(env, method);
++		  fartextInvoke(proxy_method);
++	  }
++
++  return;
++}
++
+ static jint DexFile_getDexOptNeeded(JNIEnv* env,
+                                     jclass,
+                                     jstring javaFilename,
+@@ -878,6 +894,9 @@ static JNINativeMethod gMethods[] = {
+   NATIVE_METHOD(DexFile, getDexFileOptimizationStatus,
+                 "(Ljava/lang/String;Ljava/lang/String;)[Ljava/lang/String;"),
+   NATIVE_METHOD(DexFile, setTrusted, "(Ljava/lang/Object;)V")
++  //add
++  NATIVE_METHOD(DexFile, fartextMethodCode, "(Ljava/lang/Object;)V")
++  //add end
+ };
+ 
+ void register_dalvik_system_DexFile(JNIEnv* env) {
+diff --git a/runtime/native/java_lang_reflect_Method.cc b/runtime/native/java_lang_reflect_Method.cc
+index 4355c06acd..0573cafc61 100644
+--- a/runtime/native/java_lang_reflect_Method.cc
++++ b/runtime/native/java_lang_reflect_Method.cc
+@@ -34,6 +34,14 @@
+ 
+ namespace art {
+ 
++//add
++extern "C" ArtMethod* jobject2ArtMethod(JNIEnv* env, jobject javaMethod) {
++  ScopedFastNativeObjectAccess soa(env);
++  ArtMethod* method = ArtMethod::FromReflectedMethod(soa, javaMethod);
++  return method;
++}
++//add end
++
+ static jobject Method_getDefaultValue(JNIEnv* env, jobject javaMethod) {
+   ScopedFastNativeObjectAccess soa(env);
+   ArtMethod* method = ArtMethod::FromReflectedMethod(soa, javaMethod);

@@ -1,0 +1,14 @@
+diff --git a/dalvik/src/main/java/dalvik/system/DexFile.java b/dalvik/src/main/java/dalvik/system/DexFile.java
+index afedba54362..17700a542df 100644
+--- a/dalvik/src/main/java/dalvik/system/DexFile.java
++++ b/dalvik/src/main/java/dalvik/system/DexFile.java
+@@ -393,6 +393,9 @@ public final class DexFile {
+                                                   DexFile dexFile)
+             throws ClassNotFoundException, NoClassDefFoundError;
+     private static native String[] getClassNameList(Object cookie);
++    //add
++    private static native void fartextMethodCode(Object m);
++    //add end
+     private static native boolean isBackedByOatFile(Object cookie);
+     private static native void setTrusted(Object cookie);
+     /*

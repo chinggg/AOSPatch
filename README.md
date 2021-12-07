@@ -2,6 +2,8 @@
 
 Patch Android source code to dump DEX automatically.
 
+for `android-9.0.0_r47`
+
 Repositories:
 - https://github.com/hanbinglengyue/FART
 - https://github.com/jltxgcy/fart

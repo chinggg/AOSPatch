@@ -1,0 +1,212 @@
+diff --git a/dex2oat/dex2oat.cc b/dex2oat/dex2oat.cc
+index fe927bbc1c..6059836e59 100644
+--- a/dex2oat/dex2oat.cc
++++ b/dex2oat/dex2oat.cc
+@@ -1165,6 +1165,23 @@ class Dex2Oat FINAL {
+     }
+   }
+ 
++  //++++++++++++++++++++++++++++
++  const char* UNPACK_CONFIG = "/data/local/tmp/unpacker.config";
++  bool ShouldUnpack() {
++    std::ifstream config(UNPACK_CONFIG);
++    std::string line;
++    if(config) {
++        while (std::getline(config, line)) {
++          std::string package_name = line.substr(0, line.find(':'));
++          if (oat_location_.find(package_name) != std::string::npos) {
++            return true;
++          }
++        }
++    }
++    return false;
++  }
++  //++++++++++++++++++++++++++++
++
+   // Parse the arguments from the command line. In case of an unrecognized option or impossible
+   // values/combinations, a usage error will be displayed and exit() is called. Thus, if the method
+   // returns, arguments have been successfully parsed.
+@@ -1299,6 +1316,12 @@ class Dex2Oat FINAL {
+ 
+     // Insert some compiler things.
+     InsertCompileOptions(argc, argv);
++    //++++++++++++++++++++++++++++
++    if (ShouldUnpack()) {
++      compiler_options_->SetCompilerFilter(CompilerFilter::Filter::kVerify);
++    }
++    //++++++++++++++++++++++++++++
++
+   }
+ 
+   // Check whether the oat output files are writable, and open them for later. Also open a swap
+diff --git a/runtime/Android.bp b/runtime/Android.bp
+index 9f0cf127b9..53047047fc 100644
+--- a/runtime/Android.bp
++++ b/runtime/Android.bp
+@@ -214,6 +214,8 @@ cc_defaults {
+         "verify_object.cc",
+         "well_known_classes.cc",
+         "zip_archive.cc",
++        "unpacker/unpacker.cc",
++        "unpacker/cJSON.cc",
+ 
+         "arch/context.cc",
+         "arch/instruction_set.cc",
+diff --git a/runtime/art_method.cc b/runtime/art_method.cc
+index 7030e0657b..2037d3b131 100644
+--- a/runtime/art_method.cc
++++ b/runtime/art_method.cc
+@@ -48,6 +48,9 @@
+ #include "scoped_thread_state_change-inl.h"
+ #include "vdex_file.h"
+ #include "well_known_classes.h"
++//++++++++++++++++++++++++++++
++#include "unpacker/unpacker.h"
++//++++++++++++++++++++++++++++
+ 
+ namespace art {
+ 
+@@ -337,7 +340,10 @@ void ArtMethod::Invoke(Thread* self, uint32_t* args, uint32_t args_size, JValue*
+   // If the runtime is not yet started or it is required by the debugger, then perform the
+   // Invocation by the interpreter, explicitly forcing interpretation over JIT to prevent
+   // cycling around the various JIT/Interpreter methods that handle method invocation.
+-  if (UNLIKELY(!runtime->IsStarted() || Dbg::IsForcedInterpreterNeededForCalling(self, this))) {
++  //++++++++++++++++++++++++++++
++  //如果是主动调用fake invoke并且不是native方法则强制走解释器
++  if (UNLIKELY(!runtime->IsStarted() || Dbg::IsForcedInterpreterNeededForCalling(self, this)
++      || (Unpacker::isFakeInvoke(self, this) && !this->IsNative()))) {
+     if (IsStatic()) {
+       art::interpreter::EnterInterpreterFromInvoke(
+           self, this, nullptr, args, result, /*stay_in_interpreter*/ true);
+@@ -348,6 +354,14 @@ void ArtMethod::Invoke(Thread* self, uint32_t* args, uint32_t args_size, JValue*
+           self, this, receiver, args + 1, result, /*stay_in_interpreter*/ true);
+     }
+   } else {
++    //++++++++++++++++++++++++++++
++    //如果是主动调用fake invoke并且是native方法则不执行
++    if (Unpacker::isFakeInvoke(self, this) && this->IsNative()) {
++      // Pop transition.
++      self->PopManagedStackFragment(fragment);
++      return;
++    }
++    //++++++++++++++++++++++++++++
+     DCHECK_EQ(runtime->GetClassLinker()->GetImagePointerSize(), kRuntimePointerSize);
+ 
+     constexpr bool kLogInvocationStartAndReturn = false;
+diff --git a/runtime/class_linker.h b/runtime/class_linker.h
+index 94c3b39ca8..c7fb38d15f 100644
+--- a/runtime/class_linker.h
++++ b/runtime/class_linker.h
+@@ -1352,6 +1352,9 @@ class ClassLinker {
+   friend class JniCompilerTest;  // for GetRuntimeQuickGenericJniStub
+   friend class JniInternalTest;  // for GetRuntimeQuickGenericJniStub
+   friend class VMClassLoader;  // for LookupClass and FindClassInBaseDexClassLoader.
++  //++++++++++++++++++++++++++++
++  friend class Unpacker;
++  //++++++++++++++++++++++++++++
+   ART_FRIEND_TEST(ClassLinkerTest, RegisterDexFileName);  // for DexLock, and RegisterDexFileLocked
+   ART_FRIEND_TEST(mirror::DexCacheMethodHandlesTest, Open);  // for AllocDexCache
+   ART_FRIEND_TEST(mirror::DexCacheTest, Open);  // for AllocDexCache
+diff --git a/runtime/interpreter/interpreter.cc b/runtime/interpreter/interpreter.cc
+index 735c0e815a..3682538b35 100644
+--- a/runtime/interpreter/interpreter.cc
++++ b/runtime/interpreter/interpreter.cc
+@@ -236,7 +236,10 @@ enum InterpreterImplKind {
+   kMterpImplKind          // Assembly interpreter
+ };
+ 
+-static constexpr InterpreterImplKind kInterpreterImplKind = kMterpImplKind;
++//++++++++++++++++++++++++++++
++//static constexpr InterpreterImplKind kInterpreterImplKind = kMterpImplKind;
++static constexpr InterpreterImplKind kInterpreterImplKind = kSwitchImplKind;
++//++++++++++++++++++++++++++++
+ 
+ static inline JValue Execute(
+     Thread* self,
+diff --git a/runtime/interpreter/interpreter_switch_impl.cc b/runtime/interpreter/interpreter_switch_impl.cc
+index 283885e522..6164c3cb81 100644
+--- a/runtime/interpreter/interpreter_switch_impl.cc
++++ b/runtime/interpreter/interpreter_switch_impl.cc
+@@ -24,6 +24,9 @@
+ #include "jit/jit.h"
+ #include "jvalue-inl.h"
+ #include "safe_math.h"
++//++++++++++++++++++++++++++++
++#include "unpacker/unpacker.h"
++//++++++++++++++++++++++++++++
+ 
+ namespace art {
+ namespace interpreter {
+@@ -65,8 +68,16 @@ namespace interpreter {
+   }
+ 
+ // Code to run before each dex instruction.
++//++++++++++++++++++++++++++++
+ #define PREAMBLE_SAVE(save_ref)                                                                      \
+   {                                                                                             \
++    inst_count++;                                                                               \
++    bool dumped = Unpacker::beforeInstructionExecute(self, shadow_frame.GetMethod(),            \
++                                                     dex_pc, inst_count);                       \
++    if (dumped) {                                                                               \
++      ctx->result = JValue();                                                                   \
++      return;                                                                                   \
++    }                                                                                           \
+     if (UNLIKELY(instrumentation->HasDexPcListeners()) &&                                       \
+         UNLIKELY(!DoDexPcMoveEvent(self,                                                        \
+                                    accessor,                                                    \
+@@ -79,6 +90,7 @@ namespace interpreter {
+     }                                                                                           \
+   }                                                                                             \
+   do {} while (false)
++//++++++++++++++++++++++++++++
+ 
+ #define PREAMBLE() PREAMBLE_SAVE(nullptr)
+ 
+@@ -216,6 +228,9 @@ void ExecuteSwitchImplCpp(SwitchImplContext* ctx) {
+   uint16_t inst_data;
+   jit::Jit* jit = Runtime::Current()->GetJit();
+ 
++  //++++++++++++++++++++++++++++
++  int inst_count = -1;
++  //++++++++++++++++++++++++++++
+   do {
+     dex_pc = inst->GetDexPc(insns);
+     shadow_frame.SetDexPC(dex_pc);
+@@ -2495,6 +2510,13 @@ void ExecuteSwitchImplCpp(SwitchImplContext* ctx) {
+       case Instruction::UNUSED_F3 ... Instruction::UNUSED_F9:
+         UnexpectedOpcode(inst, shadow_frame);
+     }
++    //++++++++++++++++++++++++++++
++    bool dumped = Unpacker::afterInstructionExecute(self, shadow_frame.GetMethod(), dex_pc, inst_count);
++    if (dumped) {
++      ctx->result = JValue();
++      return;
++    }
++    //++++++++++++++++++++++++++++
+   } while (!interpret_one_instruction);
+   // Record where we stopped.
+   shadow_frame.SetDexPC(inst->GetDexPc(insns));
+diff --git a/runtime/runtime.cc b/runtime/runtime.cc
+index 7696729cdd..e2771480d9 100644
+--- a/runtime/runtime.cc
++++ b/runtime/runtime.cc
+@@ -164,6 +164,9 @@
+ #include "vdex_file.h"
+ #include "verifier/method_verifier.h"
+ #include "well_known_classes.h"
++//++++++++++++++++++++++++++++
++#include "unpacker/unpacker.h"
++//++++++++++++++++++++++++++++
+ 
+ #ifdef ART_TARGET_ANDROID
+ #include <android/set_abort_message.h>
+@@ -1788,6 +1791,9 @@ void Runtime::RegisterRuntimeNativeMethods(JNIEnv* env) {
+   register_org_apache_harmony_dalvik_ddmc_DdmServer(env);
+   register_org_apache_harmony_dalvik_ddmc_DdmVmInternal(env);
+   register_sun_misc_Unsafe(env);
++  //++++++++++++++++++++++++++++
++  Unpacker::register_cn_unpack_Unpacker(env);
++  //++++++++++++++++++++++++++++
+ }
+ 
+ std::ostream& operator<<(std::ostream& os, const DeoptimizationKind& kind) {

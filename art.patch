@@ -39,6 +39,18 @@ index fe927bbc1c..6059836e59 100644
    }
  
    // Check whether the oat output files are writable, and open them for later. Also open a swap
+diff --git a/libdexfile/dex/standard_dex_file.h b/libdexfile/dex/standard_dex_file.h
+index 999e5b99e9..83ebb99d3a 100644
+--- a/libdexfile/dex/standard_dex_file.h
++++ b/libdexfile/dex/standard_dex_file.h
+@@ -16,6 +16,7 @@
+ 
+ #ifndef ART_LIBDEXFILE_DEX_STANDARD_DEX_FILE_H_
+ #define ART_LIBDEXFILE_DEX_STANDARD_DEX_FILE_H_
++#define private public
+ 
+ #include <iosfwd>
+ 
 diff --git a/runtime/Android.bp b/runtime/Android.bp
 index 9f0cf127b9..53047047fc 100644
 --- a/runtime/Android.bp

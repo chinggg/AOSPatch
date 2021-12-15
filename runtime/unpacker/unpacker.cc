@@ -12,6 +12,9 @@
 #include <sys/types.h>
 #include <fcntl.h>
 #include <string>
+#include "nativehelper/jni_macros.h"
+#include "native/native_util.h"
+
 
 #define ULOG_TAG "unpacker"
 #define TOSTR(fmt) #fmt
@@ -74,7 +77,7 @@ std::string Unpacker::getDexDumpPath(const DexFile* dex_file) {
     }
   }
   std::string dump_path = Unpacker_dex_dir_ + "/" + dex_location;
-  dump_path += StringPrintf("_%zu.dex", size);
+  dump_path += android::base::StringPrintf("_%zu.dex", size);
   return dump_path;
 }
 
@@ -90,7 +93,7 @@ std::string Unpacker::getMethodDumpPath(ArtMethod* method) {
     }
   }
   std::string dump_path = Unpacker_method_dir_ + "/" + dex_location;
-  dump_path += StringPrintf("_%zu_codeitem.bin", size);
+  dump_path += android::base::StringPrintf("_%zu_codeitem.bin", size);
   return dump_path;
 }
 
@@ -164,7 +167,7 @@ std::list<const DexFile*> Unpacker::getDexFiles() {
   std::list<const DexFile*> dex_files;
   Thread* const self = Thread::Current();
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-  ReaderMutexLock mu(self, *class_linker->DexLock());
+  ReaderMutexLock mu(self, *Locks::dex_lock_);
   const std::list<ClassLinker::DexCacheData>& dex_caches = class_linker->GetDexCachesData();
   for (auto it = dex_caches.begin(); it != dex_caches.end(); ++it) {
     ClassLinker::DexCacheData data = *it;
@@ -190,7 +193,7 @@ mirror::ClassLoader* Unpacker::getAppClassLoader() {
   jclass cls_Context = env->FindClass("android/content/Context");
   jmethodID mid_getClassLoader = env->GetMethodID(cls_Context, "getClassLoader", "()Ljava/lang/ClassLoader;");
   jobject obj_classLoader = env->CallObjectMethod(obj_mInitialApplication, mid_getClassLoader);
-  return soa.Decode<mirror::ClassLoader*>(obj_classLoader);
+  return soa.Decode<mirror::ClassLoader>(obj_classLoader).Ptr();
 }
 
 void Unpacker::invokeAllMethods() {
@@ -261,7 +264,7 @@ void Unpacker::invokeAllMethods() {
     }
     CHECK(current != nullptr);
 
-    mirror::DexCache* dex_cache = class_linker->FindDexCache(self, *dex_file, false);
+    mirror::DexCache* dex_cache = class_linker->FindDexCache(self, *dex_file).Ptr();
     StackHandleScope<2> hs(self);
     Handle<mirror::ClassLoader> h_class_loader(hs.NewHandle(Unpacker_class_loader_));
     Handle<mirror::DexCache> h_dex_cache(hs.NewHandle(dex_cache));
@@ -277,10 +280,10 @@ void Unpacker::invokeAllMethods() {
       cJSON_ReplaceItemInObject(current, "status", cJSON_CreateString("Ready"));
       writeJson();
 
-      mirror::Class* klass = class_linker->ResolveType(*dex_file, dex_file->GetClassDef(class_idx).class_idx_, h_dex_cache, h_class_loader);
+      mirror::Class* klass = class_linker->ResolveType(dex_file->GetClassDef(class_idx).class_idx_, h_dex_cache, h_class_loader).Ptr();
       if (klass == nullptr) {
         cJSON_ReplaceItemInObject(current, "status", cJSON_CreateString("ResolveClassFailed"));
-        std::string reason = StringPrintf("ResolveClass error: %s", self->GetException()->Dump().c_str());
+        std::string reason = android::base::StringPrintf("ResolveClass error: %s", self->GetException()->Dump().c_str());
         cJSON *failure = cJSON_CreateObject();
         cJSON_AddNumberToObject(failure, "index", class_idx);
         cJSON_AddStringToObject(failure, "descriptor", dex_file->GetClassDescriptor(dex_file->GetClassDef(class_idx)));
@@ -302,20 +305,20 @@ void Unpacker::invokeAllMethods() {
           writeJson();
           self->ClearException();
           ObjectLock<mirror::Class> lock(self, h_class);
-          mirror::Class::SetStatus(h_class, mirror::Class::kStatusInitialized, self);
+          mirror::Class::SetStatus(h_class, ClassStatus::kInitialized, self);
         } else {
           cJSON_ReplaceItemInObject(current, "status", cJSON_CreateString("Inited"));
           writeJson();
         }
       } else {
         ObjectLock<mirror::Class> lock(self, h_class);
-        mirror::Class::SetStatus(h_class, mirror::Class::kStatusInitialized, self);
+        mirror::Class::SetStatus(h_class, ClassStatus::kInitialized, self);
         skip_clinit = false;
         cJSON_ReplaceItemInObject(current, "status", cJSON_CreateString("Inited"));
         writeJson();
       }
       
-      size_t pointer_size = class_linker->GetImagePointerSize();
+      PointerSize pointer_size = class_linker->GetImagePointerSize();
       auto methods = klass->GetDeclaredMethods(pointer_size);
 
       Unpacker::enableFakeInvoke();
@@ -330,7 +333,7 @@ void Unpacker::invokeAllMethods() {
           JValue result;
           std::vector<uint32_t> args(args_size, 0);
           if (!method->IsStatic()) {
-            mirror::Object* thiz = klass->AllocObject(self);
+            mirror::Object* thiz = klass->AllocObject(self).Ptr();
             args[0] = StackReference<mirror::Object>::FromMirrorPtr(thiz).AsVRegValue();  
           }
           method->Invoke(self, args.data(), args_size, &result, method->GetShorty());
@@ -454,41 +457,43 @@ bool Unpacker::isRealInvoke(Thread *self, ArtMethod */*method*/) {
   return false;
 }
 
-size_t Unpacker::getCodeItemSize(ArtMethod* method) {
-  const DexFile::CodeItem* code_item = method->GetCodeItem();
-  size_t size = offsetof(DexFile::CodeItem, insns_);
-  size += code_item->insns_size_in_code_units_ * sizeof(uint16_t);
+// size_t Unpacker::getCodeItemSize(ArtMethod* method) {
+//   const DexFile::CodeItem* code_item = method->GetCodeItem();
+//   const DexFile* dex = method->GetDexFile();
+//   CodeItemDataAccessor accessor(*dex, code_item);
+//   size_t size = offsetof(StandardDexFile::CodeItem, ins_size_);
+//   size += accessor.InsnsSizeInCodeUnits() * sizeof(uint16_t);
 
-  if (code_item->tries_size_ != 0) {
-    if (code_item->insns_size_in_code_units_ % 2 != 0) {
-      //使 tries 实现四字节对齐的两字节填充. 仅当 tries_size 为非零值且 insns_size 为奇数时, 此元素才会存在
-      uint16_t padding = 2;
-      size += padding;
-    }
-    size += sizeof(DexFile::TryItem) * code_item->tries_size_;
-    const uint8_t* data = (uint8_t *)code_item + size;
+//   if (accessor.TriesSize() != 0) {
+//     if (accessor.InsnsSizeInCodeUnits() % 2 != 0) {
+//       //使 tries 实现四字节对齐的两字节填充. 仅当 tries_size 为非零值且 insns_size 为奇数时, 此元素才会存在
+//       uint16_t padding = 2;
+//       size += padding;
+//     }
+//     size += sizeof(DexFile::TryItem) * accessor.TriesSize();
+//     const uint8_t* data = (uint8_t *)code_item + size;
   
-    uint32_t handlers_size = DecodeUnsignedLeb128(&data);
-    size += UnsignedLeb128Size(handlers_size);
-    for (uint32_t handler_index = 0; handler_index < handlers_size; handler_index++) {
-      data = (uint8_t *)code_item + size;
-      int32_t handler_data_size = DecodeSignedLeb128(&data);
-      size += SignedLeb128Size(handler_data_size);
-      for (int32_t handler_data_index = 0; handler_data_index < abs(handler_data_size); handler_data_index++) {
-        data = (uint8_t *)code_item + size;
-        size += UnsignedLeb128Size(DecodeUnsignedLeb128(&data));
-        data = (uint8_t *)code_item + size;
-        size += UnsignedLeb128Size(DecodeUnsignedLeb128(&data));
-      }
-      if (handler_data_size <= 0) {
-        data = (uint8_t *)code_item + size;
-        size += UnsignedLeb128Size(DecodeUnsignedLeb128(&data));
-      }
-    }
-  }
+//     uint32_t handlers_size = DecodeUnsignedLeb128(&data);
+//     size += UnsignedLeb128Size(handlers_size);
+//     for (uint32_t handler_index = 0; handler_index < handlers_size; handler_index++) {
+//       data = (uint8_t *)code_item + size;
+//       int32_t handler_data_size = DecodeSignedLeb128(&data);
+//       size += SignedLeb128Size(handler_data_size);
+//       for (int32_t handler_data_index = 0; handler_data_index < abs(handler_data_size); handler_data_index++) {
+//         data = (uint8_t *)code_item + size;
+//         size += UnsignedLeb128Size(DecodeUnsignedLeb128(&data));
+//         data = (uint8_t *)code_item + size;
+//         size += UnsignedLeb128Size(DecodeUnsignedLeb128(&data));
+//       }
+//       if (handler_data_size <= 0) {
+//         data = (uint8_t *)code_item + size;
+//         size += UnsignedLeb128Size(DecodeUnsignedLeb128(&data));
+//       }
+//     }
+//   }
 
-  return size;
-}
+//   return size;
+// }
 
 void Unpacker::dumpMethod(ArtMethod *method, int nop_size) {
   std::string dump_path = Unpacker::getMethodDumpPath(method);
@@ -506,10 +511,12 @@ void Unpacker::dumpMethod(ArtMethod *method, int nop_size) {
   }
 
   uint32_t index = method->GetDexMethodIndex();
-  std::string str_name = PrettyMethod(method);
+  std::string str_name = ArtMethod::PrettyMethod(method);
   const char* name = str_name.c_str();
   const DexFile::CodeItem* code_item = method->GetCodeItem();
-  uint32_t code_item_size = (uint32_t)Unpacker::getCodeItemSize(method);
+  const DexFile* dex = method->GetDexFile();
+  // uint32_t code_item_size = (uint32_t)Unpacker::getCodeItemSize(method);
+  uint32_t code_item_size = dex->GetCodeItemSize(*code_item);
 
   size_t total_size = 4 + strlen(name) + 1 + 4 + code_item_size;
   std::vector<uint8_t> data(total_size);
@@ -522,19 +529,21 @@ void Unpacker::dumpMethod(ArtMethod *method, int nop_size) {
   buf += 4;
   memcpy(buf, code_item, code_item_size);
   if (nop_size != 0) {
-    memset(buf + offsetof(DexFile::CodeItem, insns_), 0, nop_size);
+    memset(buf + offsetof(StandardDexFile::CodeItem, ins_size_), 0, nop_size);
   }
 
   ssize_t written_size = write(fd, data.data(), total_size);
   if (written_size > (ssize_t)total_size) {
-    ULOGW("write %s in %s %zd/%zu error: %s", PrettyMethod(method).c_str(), dump_path.c_str(), written_size, total_size, strerror(errno));
+    ULOGW("write %s in %s %zd/%zu error: %s", ArtMethod::PrettyMethod(method).c_str(), dump_path.c_str(), written_size, total_size, strerror(errno));
   }
 }
 
 //继续解释执行返回false, dump完成返回true
 bool Unpacker::beforeInstructionExecute(Thread *self, ArtMethod *method, uint32_t dex_pc, int inst_count) {
   if (Unpacker::isFakeInvoke(self, method)) {
-    const uint16_t* const insns = method->GetCodeItem()->insns_;
+    CodeItemInstructionAccessor accessor(*method->GetDexFile(), method->GetCodeItem());
+    // const uint16_t* const insns = method->GetCodeItem()->insns_;
+    const uint16_t* const insns = accessor.Insns();
     const Instruction* inst = Instruction::At(insns + dex_pc);
     uint16_t inst_data = inst->Fetch16(0);
     Instruction::Code opcode = inst->Opcode(inst_data);
@@ -560,7 +569,7 @@ bool Unpacker::beforeInstructionExecute(Thread *self, ArtMethod *method, uint32_
         const Instruction* inst_first = Instruction::At(insns);
         Instruction::Code first_opcode = inst_first->Opcode(inst->Fetch16(0));
         CHECK(first_opcode >= Instruction::GOTO && first_opcode <= Instruction::GOTO_32);
-        ULOGD("found najia/ijiami %s", PrettyMethod(method).c_str());
+        ULOGD("found najia/ijiami %s", ArtMethod::PrettyMethod(method).c_str());
         switch (first_opcode)
         {
         case Instruction::GOTO:
@@ -587,7 +596,9 @@ bool Unpacker::beforeInstructionExecute(Thread *self, ArtMethod *method, uint32_
 }
 
 bool Unpacker::afterInstructionExecute(Thread *self, ArtMethod *method, uint32_t dex_pc, int inst_count) {
-  const uint16_t* const insns = method->GetCodeItem()->insns_;
+  CodeItemInstructionAccessor accessor(*method->GetDexFile(), method->GetCodeItem());
+  // const uint16_t* const insns = method->GetCodeItem()->insns_;
+  const uint16_t* const insns = accessor.Insns();
   const Instruction* inst = Instruction::At(insns + dex_pc);
   uint16_t inst_data = inst->Fetch16(0);
   Instruction::Code opcode = inst->Opcode(inst_data);
@@ -609,8 +620,8 @@ static JNINativeMethod gMethods[] = {
   NATIVE_METHOD(Unpacker, unpackNative, "()V")
 };
 
-void Unpacker::register_cn_youlor_Unpacker(JNIEnv* env) {
-  REGISTER_NATIVE_METHODS("cn/youlor/Unpacker");
+void Unpacker::register_cn_unpack_Unpacker(JNIEnv* env) {
+  REGISTER_NATIVE_METHODS("cn/unpack/Unpacker");
 }
 
 }

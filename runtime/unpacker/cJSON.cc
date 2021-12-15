@@ -70,12 +70,12 @@
 #define false ((cJSON_bool)0)
 
 /* define isnan and isinf for ANSI C, if in C99 or above, isnan and isinf has been defined in math.h */
-#ifndef isinf
-#define isinf(d) (isnan((d - d)) && !isnan(d))
-#endif
-#ifndef isnan
-#define isnan(d) (d != d)
-#endif
+// #ifndef isinf
+// #define isinf(d) (isnan((d - d)) && !isnan(d))
+// #endif
+// #ifndef isnan
+// #define isnan(d) (d != d)
+// #endif
 
 #ifndef NAN
 #define NAN 0.0/0.0
